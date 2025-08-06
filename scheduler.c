@@ -1,567 +1,610 @@
 #include "headers.h"
-#define MEMORY_LIMIT 1024
-//Physical memory 
-struct memory_node* memory[11];
 
-void rabbit(int start, int i, int size)
-{
-    struct memory_node* temp = malloc(sizeof(struct memory_node));
-    temp->start = start;
-    temp->size = size;
-    temp->next = memory[i];
-    memory[i] = temp;
-}
-int allocate(int size)
-{
+#pragma region "Static variables needed to clear resources"
+enum schedulingAlgorithm alg;
 
-    int memSize = ceil(log2(size));
-    int startSplit = memSize;
-    while (startSplit < 11 && !memory[startSplit])
-    {
-        startSplit++;
-    }
-    for (int i = startSplit; i > memSize && i < 11; i--)
-    {
-        int childSize = 1 << (i - 1);
-        struct memory_node* temp = memory[i];
-        memory[i] = memory[i]->next;
-        int start = temp->start;
-        free(temp);
-        rabbit(start + childSize, i - 1, childSize);
-        rabbit(start, i - 1, childSize);
-    }
+struct PriorityQueue *pq;
 
-    if (memory[memSize])
-    {
-        struct memory_node* temp = memory[memSize];
-        memory[memSize] = memory[memSize]->next;
-        int start = temp->start;
-        free(temp);
-        return start;
-    }
-    else
-    {
-        return -1;
-    }
-}
-void deallocate(int start, int size)
-{
-    int i = ceil(log2(size));
-    size = 1 << i;
-    int index = start / size;
-    int op = 0;
-    if (index % 2 == 0)
-    {
-        op = 1;
-    }
-    else
-    {
-        op = -1;
-    }
-    struct memory_node* temp = memory[i];
-    int found = 0;
-    struct memory_node* prev = NULL;
-    while (temp) {
-        int tempIndex = temp->start / temp->size;
-        if (tempIndex == (index + op)) {
-            if (prev == NULL)
-                memory[i] = temp->next;
-            else
-                prev->next = temp->next;
-            if (index % 2 == 0)
-            {
-                deallocate(start, size * 2);
-            }
-            else
-            {
-                deallocate(temp->start, size * 2);
-            }
-            free(temp);
-            found = 1;
-            break;
+struct processData runningProcess;
+
+struct processStateInfo current_process_info;
+struct processStateInfoMsgBuff current_process_msg;
+
+int Terminating_Process_MSGQ;
+int Terminating_Process_RCV_VAL;
+
+struct processStateInfo *ProcessTable;
+
+int x;
+
+void clearResources(int signum);
+
+#pragma endregion
+
+#pragma region "SIGCHLD Handler things"
+
+// Flag used to notify scheduler that the process it holds has been terminated
+int processTerminate = 0;
+int proccessRunningSJF = 0;
+int terminatedProcessId = -2;
+
+int numberFinishedProcesses = 0;
+
+// round robin origin
+int origin = 0;
+
+// Number of children <<PROBABLY UNNECESSARY>>
+/*int numberChildren = 0;*/
+
+// When processes terminate they will notify the scheduler from here
+void handler_SIGCHILD(int signal);
+
+#pragma endregion
+
+bool processAllocated = 0;
+bool processWaitingFlag = 0;
+
+struct memBlock *allocatedMemoryBlocks;
+struct memBlock *emptyMemoryBlocks;
+
+int main(int argc, char *argv[]) {
+#pragma region "initialization"
+  signal(SIGINT, clearResources);
+  signal(SIGUSR2, handler_SIGCHILD);
+  initClk();
+  x = getClk();
+
+  alg = atoi(argv[1]);
+  unsigned int quantum = atoi(argv[2]);
+  unsigned int countProcesses = atoi(argv[3]);
+
+#pragma endregion
+
+  emptyMemoryBlocks = (struct memBlock *)malloc(sizeof(struct memBlock));
+  emptyMemoryBlocks->starts = 0;
+  emptyMemoryBlocks->PID = -1;
+  emptyMemoryBlocks->size = 1024;
+  emptyMemoryBlocks->next = NULL;
+
+  ProcessTable = (struct processStateInfo *)malloc(
+      countProcesses * sizeof(struct processStateInfo));
+
+#pragma region "Initializing message queue"
+#pragma region "Generator to Scheduler Message Queue"
+  key_t Gen_Sched_Key;
+  int Gen_Sched_RCV_VAL;
+  int Gen_Sched_MSGQ;
+  Gen_Sched_Key = ftok("Gen_Sched_KeyFile", 1);
+  Gen_Sched_MSGQ = msgget(Gen_Sched_Key, IPC_CREAT | 0666);
+  if (Gen_Sched_MSGQ == -1) {
+    perror("Error in Creating Generator to Scheduler Message Queue");
+    exit(-1);
+  }
+#pragma endregion
+
+#pragma region "Terminiating Process Message Queue"
+  key_t Terminating_Process_Key;
+  Terminating_Process_Key = ftok("Terminating_Processes_KeyFile", 2);
+  Terminating_Process_MSGQ = msgget(Terminating_Process_Key, IPC_CREAT | 0666);
+  if (Terminating_Process_MSGQ == -1) {
+    perror("Error in Creating Generator to Scheduler Message Queue");
+    exit(-1);
+  }
+#pragma endregion
+
+  struct processMsgBuff RecievedProcess;
+  runningProcess.pid = -1;
+  struct processStateInfoMsgBuff Process_Info;
+#pragma endregion
+
+  PriorityQueue *pq = initialize_priQ();
+#pragma region "output init"
+  p_out = fopen("Scheduler.log", "w");
+  fprintf(p_out, "# At \ttime x \tprocess y \tstate arr w \ttotal z \tremain y "
+                 "\twait k\n");
+  fclose(p_out);
+#pragma endregion
+  p_out = fopen("memory.log", "w");
+  fprintf(p_out,
+          "# At \ttime x \tallocated y \tbytes for process z \tfrom i to j\n");
+  fclose(p_out);
+
+  // printf("I have reached before the switchcase");
+
+  // TODO implement the scheduler :)
+  printf("algo = %d\n", alg);
+  switch (alg) {
+  case SJF: {
+    int currentNumberProccess = 0;
+    while (numberFinishedProcesses < countProcesses) {
+
+      x = getClk();
+      if (!processWaitingFlag) {
+
+        Gen_Sched_RCV_VAL =
+            msgrcv(Gen_Sched_MSGQ, &RecievedProcess,
+                   sizeof(struct processMsgBuff) - sizeof(long), 0, IPC_NOWAIT);
+        if (Gen_Sched_RCV_VAL != -1 && Gen_Sched_RCV_VAL != 0) {
+          printf("Recieved a Process! %d\n\n\n", RecievedProcess.process.id);
+
+          processWaitingFlag = 1;
+          processAllocated = memoryAllocate(
+              RecievedProcess.process.memsize, RecievedProcess.process.id,
+              &allocatedMemoryBlocks, &emptyMemoryBlocks);
         }
-        prev = temp;
-        temp = temp->next;
-    }
-    if (!found) {
-        rabbit(start, i, size);
-    }
-}
-
-int shmid1, arrivalsshID, msgq_id, prevClkID, numOfProcesses, typeAlgo, slot, finishedProcesses = 0, totalbrust = 0, finalclk = 0;
-int* remainingTime;
-int* arrivals;
-int idx = 0;
-double TotalWaitingTime = 0, TotalWTA = 0;
-double* WTA_Arr;
-struct PCB* runningProcess, * temporary;
-Node* readyQueue, * Stopping_Resuming_Queue;
-FILE* SchedulerLog, * schedulerperf;
-FILE* MemoryLog;
-struct Queue* queue;
-Node* waitingQueue;
-void remainingTimeSharedMemory()
-{
-    key_t shmKey1;
-    shmKey1 = ftok("keyfile", 65);
-    shmid1 = shmget(shmKey1, sizeof(int), IPC_CREAT | 0666);
-    if (shmid1 == -1)
-    {
-        perror("Error in creating the shared memory");
-        exit(-1);
-    }
-}
-void numberOfProcessarrived()
-{
-    key_t shmKey1;
-    shmKey1 = ftok("keyfile", 120);
-    arrivalsshID = shmget(shmKey1, sizeof(int), 0666);
-    if (arrivalsshID == -1)
-    {
-        perror("Error in creating the shared memory");
-        exit(-1);
-    }
-}
-void processesMessageQueue()
-{
-    key_t msgqKey;
-    msgqKey = ftok("keyfile", 65);
-    msgq_id = msgget(msgqKey, 0444);
-    if (msgq_id == -1)
-    {
-        perror("Error in importing the message queue");
-        exit(-1);
-    }
-}
-
-void prevClkSharedMemory()
-{
-    key_t prevClkKey;
-    prevClkKey = ftok("keyfile", 100);
-    prevClkID = shmget(prevClkKey, sizeof(int), IPC_CREAT | 0666);
-    if (prevClkID == -1)
-    {
-        perror("Error in creating the shared memory");
-        exit(-1);
-    }
-}
-
-struct PCB* createProcess()
-{
-
-    struct processData message;
-    int rec_val = msgrcv(msgq_id, &message, sizeof(message), 0, IPC_NOWAIT);
-    if (rec_val == -1)
-    {
-        printf("Error in receive\n");
-        return NULL;
-    }
-    else
-    {
-        struct PCB* newProcess = malloc(sizeof(struct PCB));
-        newProcess->arrival = message.arrivaltime;
-        newProcess->brust = message.runningtime;
-        newProcess->id = message.id;
-        newProcess->priority = message.priority;
-        newProcess->running = 0;
-        newProcess->wait = 0;
-        newProcess->stop = 0;
-        newProcess->size = message.memsize;
-        // printf("\nMessage received: at time %d\n",getClk());
-        return newProcess;
-    }
-}
-
-void HPF();
-void SRTN();
-void RR();
-
-void handl(int signum) {}
-void Writeperf();
-int main(int argc, char* argv[])
-{
-    initClk();
-    rabbit(0, 10, MEMORY_LIMIT);
-    SchedulerLog = fopen("scheduler.log", "w");
-    MemoryLog = fopen("memory.log", "w");
-    schedulerperf = fopen("scheduler.perf", "w");
-    //TODO implement the scheduler :)
-    //upon termination release the clock resources.
-    //shared memory between process and scheduler (remaining time)
-    remainingTimeSharedMemory();
-    //message queue between process_generator and scheduler (insert processes)
-    processesMessageQueue();
-    prevClkSharedMemory();
-    numberOfProcessarrived();
-    arrivals = (int*)shmat(arrivalsshID, (void*)0, 0);
-    remainingTime = (int*)shmat(shmid1, 0, 0);
-    if (argc < 2) {
-        printf("Too few arguments. Exiting!\n");
-        exit(1);
-    }
-    signal(SIGCHLD, handl);
-    numOfProcesses = atoi(argv[0]);
-    WTA_Arr = malloc(numOfProcesses * sizeof(double));
-    typeAlgo = atoi(argv[1]);
-    if (typeAlgo == 3)
-        slot = atoi(argv[2]);
-    runningProcess = NULL;
-    system("gcc process.c -o process");
-    switch (typeAlgo)
-    {
-    case 1:
-        HPF();
-        break;
-
-    case 2:
-        SRTN();
-        break;
-
-    case 3:
-        queue = createQueue(numOfProcesses);
-        RR();
-        free(queue);
-        break;
-
-    default:
-        HPF();
-    }
-    Writeperf();
-    printf("Scheduling done\n");
-    shmdt(remainingTime);
-    shmdt(arrivals);
-    shmctl(shmid1, IPC_RMID, NULL);
-    shmctl(prevClkID, IPC_RMID, NULL);
-    shmctl(arrivalsshID, IPC_RMID, NULL);
-    fclose(SchedulerLog);
-    fclose(MemoryLog);
-    fclose(schedulerperf);
-    destroyClk(true);
-}
-void Writeperf()
-{
-    fprintf(schedulerperf, "CPU utilization = %0.2f%c \n", ((float)totalbrust / finalclk) * 100, '%');
-    fprintf(schedulerperf, "Avg WTA = %0.2f \n", TotalWTA / numOfProcesses);
-    double avg = TotalWTA / numOfProcesses;
-    fprintf(schedulerperf, "Avg Waiting = %0.2f \n", TotalWaitingTime / numOfProcesses);
-    double sd = 0;
-    for (int i = 0; i < numOfProcesses; i++)
-    {
-        sd += pow((WTA_Arr[i] - avg), 2);
-    }
-    fprintf(schedulerperf, "Std WTA = %0.2f \n", sd / numOfProcesses);
-}
-
-bool allocateMemoryLog(struct PCB* p)
-{
-    printf("Allocating Memory..\n");
-    p->startAddress = allocate(p->size);
-    int i = p->startAddress;
-    printf("After Allocation - start %d - size %d\n", i, p->size);
-    if (i == -1)
-    {
-        return false;
-    }
-    int j = i + pow(2, ceil(log2(p->size))) - 1;
-    fprintf(MemoryLog, "At time %d allocated %d bytes for process %d from %d to %d\n", getClk(), p->size, p->id, i, j);
-    return true;
-}
-
-void deallocateMemoryLog(struct PCB* p)
-{
-    printf("Deallocating Memory..\n");
-    int i = p->startAddress;
-    int j = i + pow(2, ceil(log2(p->size))) - 1;
-    deallocate(p->startAddress, p->size);
-    fprintf(MemoryLog, "At time %d freed %d bytes for process %d from %d to %d\n", getClk(), p->size, p->id, i, j);
-}
-
-void resumeProcess(struct PCB* p)
-{
-    p->wait += getClk() - p->stop;
-    fprintf(SchedulerLog, "At time %d process %d resumed arr %d total %d remain %d wait %d\n",
-        getClk(), p->id, p->arrival, p->brust, p->brust - p->running, p->wait);
-    int* prev = (int*)shmat(prevClkID, (void*)0, 0);
-    *prev = getClk();
-    shmdt(prev);
-    kill(p->pid, SIGCONT);
-}
-
-void finishProcess(struct PCB* p)
-{
-    int stat_loc;
-    if (p->brust != 0)
-        waitpid(runningProcess->pid, &stat_loc, 0);
-    p->wait = getClk() - p->arrival - p->brust;
-    deallocateMemoryLog(p);
-    double WTA = (getClk() - p->arrival) * 1.0 / p->brust;
-    if (p->brust == 0)
-        WTA = 0;
-    TotalWaitingTime += p->wait;
-    TotalWTA += ((int)(WTA * 100)) / 100.0;
-    WTA_Arr[idx] = ((int)(WTA * 100)) / 100.0;
-    idx++;
-    totalbrust += p->brust;
-    finalclk = getClk();
-    fprintf(SchedulerLog, "At time %d process %d finished arr %d total %d remain %d wait %d TA %d WTA %.2f\n",
-        getClk(), p->id, p->arrival, p->brust, p->brust - p->running, p->wait, getClk() - p->arrival, WTA);
-    Node* tempQueue = NULL;
-    while (!isEmpty(&waitingQueue)) {
-        struct PCB* waitingProcess = peek(&waitingQueue);
-        bool allocated = allocateMemoryLog(waitingProcess);
-        if (allocated) {
-            pop(&waitingQueue);
-            if (typeAlgo == 3)
-                enqueue(queue, waitingProcess);
-            else if (typeAlgo == 2)
-                push(&readyQueue, waitingProcess, waitingProcess->brust - waitingProcess->running);
-        }
-        else
+      } else
         {
-            if (typeAlgo == 3)
-                break;
-            else if (typeAlgo == 2) {
-                pop(&waitingQueue);
-                push(&tempQueue, waitingProcess, waitingProcess->brust - waitingProcess->running);
-            }
-        }
-    }
-    while (!isEmpty(&tempQueue)) {
-        struct PCB* tempProcess = peek(&tempQueue);
-        push(&waitingQueue, tempProcess, tempProcess->brust - tempProcess->running);
-        pop(&tempQueue);
-    }
-}
+          if (processAllocated) {
 
-void stopProcess(struct PCB* p)
-{
-    if (typeAlgo == 3 && runningProcess->running == runningProcess->brust)
+            int PID = fork();
+
+            if (PID == 0) {
+              char strrunTime[6];
+              char strid[6];
+              char strarrivalTime[6];
+              sprintf(strrunTime, "%d", RecievedProcess.process.runTime);
+              sprintf(strid, "%d", RecievedProcess.process.id);
+              sprintf(strarrivalTime, "%d",
+                      RecievedProcess.process.arrivalTime);
+              char *processargs[] = {"./process.out", strrunTime, strid,
+                                     strarrivalTime, NULL};
+              execv("process.out", processargs);
+              perror("Execv failed!\n");
+            }
+            printf("Child Fork! %d\n\n\n", RecievedProcess.process.id);
+            // Parent process (scheduler)
+            RecievedProcess.process.pid = PID;
+
+            // Finding the allocated memory block
+            struct memBlock *tempMemoryBlock = allocatedMemoryBlocks;
+            while (tempMemoryBlock->PID != RecievedProcess.process.id) {
+              tempMemoryBlock = tempMemoryBlock->next;
+            }
+
+#pragma region "Initializing some variables for process in the process table"
+
+            ProcessTable[RecievedProcess.process.id - 1].arrivalTime =
+                RecievedProcess.process.arrivalTime;
+            ProcessTable[RecievedProcess.process.id - 1].runTime =
+                RecievedProcess.process.runTime;
+            ProcessTable[RecievedProcess.process.id - 1].remainingTime =
+                RecievedProcess.process.runTime;
+            ProcessTable[RecievedProcess.process.id - 1].id =
+                RecievedProcess.process.id;
+
+            ProcessTable[RecievedProcess.process.id - 1].memSize =
+                RecievedProcess.process.memsize;
+            ProcessTable[RecievedProcess.process.id - 1].offset =
+                tempMemoryBlock->starts;
+
+#pragma endregion
+
+            RecievedProcess.process.pid = PID;
+
+            currentNumberProccess += 1;
+            printf("Current number proccess section 1 = %d\n",
+                   currentNumberProccess);
+
+            // Adding process to queue
+            insert_SJF_priQ(pq, RecievedProcess.process);
+
+            // Stopping proccess that has just been forked
+            kill(PID, SIGSTOP);
+
+            outputMEM(ProcessTable[RecievedProcess.process.id - 1], x,
+                      ALLOCATE);
+
+            processWaitingFlag = 0;
+            processAllocated = 0;
+
+          } else {
+            processAllocated = memoryAllocate(
+                RecievedProcess.process.memsize, RecievedProcess.process.id,
+                &allocatedMemoryBlocks, &emptyMemoryBlocks);
+          }
+        }
+
+      if (proccessRunningSJF == 0) {
+        struct processData highestprio = extract_highestpri(pq);
+        if (highestprio.pid != -1) {
+          printf("Process Found!\n");
+          currentNumberProccess -= 1;
+
+          proccessRunningSJF = 1;
+
+          kill(highestprio.pid, SIGCONT);
+
+          struct processStateInfo proccesRunning =
+              ProcessTable[highestprio.id - 1];
+
+          output(proccesRunning, x, running);
+        }
+      }
+    }
+  } break;
+  case PHPF:
+#pragma region "Preemptive HPF"
+    // signal()
     {
-        finishProcess(p);
-        finishedProcesses++;
-        runningProcess = NULL;
-        return;
-    }
-    p->stop = getClk();
-    fprintf(SchedulerLog, "At time %d process %d stopped arr %d total %d remain %d wait %d\n",
-        getClk(), p->id, p->arrival, p->brust, p->brust - p->running, p->wait);
-    kill(p->pid, SIGSTOP);
-}
+      {
+        int currentNumberProcess = 0;
+        int processesCompleted = 0;
 
-void startProcess(struct PCB* p)
-{
-    p->start = getClk();
-    p->wait += p->start - p->arrival;
-    fprintf(SchedulerLog, "At time %d process %d started arr %d total %d remain %d wait %d\n",
-        getClk(), p->id, p->arrival, p->brust, p->brust - p->running, p->wait);
+        // Main scheduling loop
+        while (processesCompleted < countProcesses) {
+          x = getClk(); // Get current system time
 
-}
+          // PART 1: HANDLE NEW PROCESS ARRIVALS
+          int Gen_Sched_RCV_VAL =
+              msgrcv(Gen_Sched_MSGQ, &RecievedProcess,
+                     sizeof(struct processMsgBuff), 0, IPC_NOWAIT);
 
-void HPF() {
-    printf("HPF\n");
-    while (finishedProcesses < numOfProcesses) {
-        while (arrivals[getClk()])
-        {
-            struct PCB* curr = createProcess();
-            while (curr)
-            {
-                arrivals[getClk()]--;
-                push(&readyQueue, curr, curr->priority);
-                curr = createProcess();
+          // If a new process was received
+          if (Gen_Sched_RCV_VAL != -1) {
+            int PID = fork();
 
-            }
-        }
+            if (PID == -1) {
+              perror("Fork failed");
+              exit(-1);
+            } else if (PID == 0) {
+              // Child process: prepare arguments for process execution
+              char strrunTime[6];
+              char strid[6];
+              char strarrivalTime[6];
+              sprintf(strrunTime, "%d", RecievedProcess.process.runTime);
+              sprintf(strid, "%d", RecievedProcess.process.id);
+              sprintf(strarrivalTime, "%d",
+                      RecievedProcess.process.arrivalTime);
 
-        if (!runningProcess && !isEmpty(&readyQueue))
-        {
-            runningProcess = peek(&readyQueue);
-            pop(&readyQueue);
-            allocateMemoryLog(runningProcess);
-            *remainingTime = runningProcess->brust;
-            startProcess(runningProcess);
-            int pid = fork();
-            if (pid == -1)
-            {
-                scanf("error in fork in scheduler\n");
-                kill(getpgrp(), SIGKILL);
+              char *processargs[] = {"./process.out", strrunTime, strid,
+                                     strarrivalTime, NULL};
+              execv("./process.out", processargs);
             }
-            if (pid == 0)
-            {
-                printf("%d\n", runningProcess->id);
-                execl("./process", "process", NULL);
-            }
-        }
-        //int currClk = getClk();
-        if (*remainingTime == 0 && runningProcess)
-        {
-            runningProcess->running = runningProcess->brust;
-            finishProcess(runningProcess);
-            free(runningProcess);
-            runningProcess = NULL;
-            finishedProcesses++;
-        }
-    }
-}
 
-void SRTN() {
-    printf("SRTN\n");
-    while (finishedProcesses < numOfProcesses) {
-        while (arrivals[getClk()])
-        {
-            struct PCB* curr = createProcess();
-            while (curr)
-            {
-                arrivals[getClk()]--;
-                printf("Total burst time is %d", totalbrust);
-                printf("\n****\n ID: %d---Arr:%d ---Priority:%d ---Brust:%d\n****\n", curr->id, curr->arrival, curr->priority, curr->brust);
-                bool allocated = allocateMemoryLog(curr);
-                printf("%d\n", allocated);
-
-                if (allocated)
-                {
-                    push(&readyQueue, curr, curr->brust - curr->running);
-                }
-                else
-                {
-                    push(&waitingQueue, curr, curr->brust - curr->running);
-                }
-                curr = createProcess();
-            }
-        }
-        if (*remainingTime <= 0 && runningProcess)
-        {
-            runningProcess->running = runningProcess->brust;
-            finishProcess(runningProcess);
-            free(runningProcess);
-            runningProcess = NULL;
-            finishedProcesses++;
-        }
-        if (runningProcess && !isEmpty(&readyQueue))
-        {
-            temporary = peek(&readyQueue);
-            if (temporary->brust < *remainingTime)
-            {
-                runningProcess->running = runningProcess->brust - (*remainingTime);
-                push(&readyQueue, runningProcess, runningProcess->brust - runningProcess->running);
-                push(&Stopping_Resuming_Queue, runningProcess, runningProcess->brust - runningProcess->running);
-
-                stopProcess(runningProcess);
-                runningProcess = NULL;
-                QueuePrint(&readyQueue);
-            }
-        }
-        if (!runningProcess && !isEmpty(&readyQueue))
-        {
-            runningProcess = peek(&readyQueue);
-            pop(&readyQueue);
-            while (runningProcess->brust == 0)
-            {
-                startProcess(runningProcess);
-                finishProcess(runningProcess);
-                free(runningProcess);
-                runningProcess = NULL;
-                finishedProcesses++;
-                runningProcess = peek(&readyQueue);
-                pop(&readyQueue);
-            }
-            *remainingTime = runningProcess->brust - runningProcess->running;
-            if (IsTHere(&Stopping_Resuming_Queue, runningProcess->id))
-            {
-                resumeProcess(runningProcess);
-            }
-            else
-            {
-                startProcess(runningProcess);
-                int pid = fork();
-                if (pid == -1)
-                {
-                    printf("error in fork in scheduler\n");
-                    kill(getpgrp(), SIGKILL);
-                }
-                if (pid == 0)
-                {
-                    execl("./process", "process", NULL);
-                }
-                runningProcess->pid = pid;
-            }
-        }
-        if (*remainingTime == 0 && runningProcess)
-        {
-            runningProcess->running = runningProcess->brust;
-            finishProcess(runningProcess);
-            free(runningProcess);
-            runningProcess = NULL;
-            finishedProcesses++;
-        }
-    }
-}
-void RR()
-{
-    int remainingStart = 0;
-    printf("Round Robin with time slot %d\n", slot);
-    while (finishedProcesses < numOfProcesses) {
-        while (arrivals[getClk()])
-        {
-            struct PCB* curr = createProcess();
-            while (curr)
-            {
-                arrivals[getClk()]--;
-                bool allocated = allocateMemoryLog(curr);
-                if (allocated)
-                    enqueue(queue, curr);
-                else
-                    push(&waitingQueue, curr, curr->size);
-                curr = createProcess();
-            }
-        }
-
-        if (runningProcess)
-        {
-            if (*remainingTime == 0)
-            {
-                runningProcess->running = runningProcess->brust;
-                finishProcess(runningProcess);
-                free(runningProcess);
-                runningProcess = NULL;
-                finishedProcesses++;
-            }
-            else if (remainingStart - *remainingTime == slot && !arrivals[getClk()])
-            {
-                remainingStart = *remainingTime;
-                if (!isEmptyQ(queue))
-                {
-                    runningProcess->running = runningProcess->brust - *remainingTime;;
-                    stopProcess(runningProcess);
-                    if (runningProcess)
-                        enqueue(queue, runningProcess);
-                    runningProcess = NULL;
-                }
-            }
-        }
-        if (!runningProcess && !isEmptyQ(queue))
-        {
-            runningProcess = dequeue(queue);
-            *remainingTime = runningProcess->brust - runningProcess->running;
-            if (runningProcess->running)
-            {
-                resumeProcess(runningProcess);
-            }
             else {
-                startProcess(runningProcess);
-                int pid = fork();
-                if (pid == -1)
-                {
-                    scanf("error in fork in scheduler\n");
-                    kill(getpgrp(), SIGKILL);
-                }
-                if (pid == 0)
-                {
-                    execl("./process", "process", NULL);
-                }
-                runningProcess->pid = pid;
+              // Parent process (scheduler)
+              RecievedProcess.process.pid = PID;
+
+              // Initialize process state information
+              struct processStateInfo processInfo;
+              processInfo.id = RecievedProcess.process.id;
+              processInfo.arrivalTime = RecievedProcess.process.arrivalTime;
+              processInfo.runTime = RecievedProcess.process.runTime;
+              processInfo.remainingTime = RecievedProcess.process.runTime;
+
+              // Store process information in process table
+              ProcessTable[RecievedProcess.process.id - 1] = processInfo;
+
+              // Add process to priority queue
+              insert_PHPF_priQ(pq, RecievedProcess.process);
+
+              // Log process arrival
+              output(processInfo, x, waiting);
+
+              currentNumberProcess++;
             }
-            remainingStart = *remainingTime;
+            kill(PID, SIGSTOP);
+            printf("process Stopped\n");
+          }
+          // PART 2: HANDLE PROCESS TERMINATION
+
+          if (processTerminate) {
+            currentNumberProcess--;
+            processesCompleted++;
+            runningProcess.pid = -1;
+            // output(terminatedProcess, x, 0);
+            processTerminate = 0;
+          }
+
+          // struct processStateInfoMsgBuff terminatedProcessMsg;
+          // int termination_result = msgrcv(Terminating_Process_MSGQ,
+          //                                 &terminatedProcessMsg,
+          //                                 sizeof(struct
+          //                                 processStateInfoMsgBuff) -
+          //                                 sizeof(long), 0, IPC_NOWAIT);
+          //
+          // if (termination_result != -1) {
+          //   printf("TERMINATOR!\n");
+          //   // Process has terminated
+          //   struct processStateInfo terminatedProcess =
+          //   terminatedProcessMsg.processState;
+          //
+          //   // Update process table
+          //   ProcessTable[terminatedProcess.id - 1] = terminatedProcess;
+          //
+          //   // Log process completion
+          //   printf("x: %d\n", x);
+          //   // output(terminatedProcess, x, 0);
+          //
+          //   printf("process Table with salt\n");
+          //
+          //   // Decrement active process count
+          //   currentNumberProcess--;
+          //   processesCompleted++;
+          //   printf("numberProcess: %d\t processesCompleted: %d\n",
+          //   currentNumberProcess, processesCompleted);
+          //
+          //   // Reset running process
+          //   runningProcess.pid = -1;
+          //   printf("pq Head: %p,\tpid: %d\tpriority: %d\tid: %d\n", pq->head,
+          //   runningProcess.pid, runningProcess.priority, runningProcess.id);
+          // }
+          // PART 3: SCHEDULE NEXT PROCESS
+          if (pq->head != NULL &&
+              (runningProcess.pid == -1 ||
+               pq->head->process.priority < runningProcess.priority)) {
+
+            printf("Scheduling!\n");
+            // Preempt current running process if needed
+            if (runningProcess.pid != -1) {
+              kill(runningProcess.pid, SIGSTOP);
+              output(ProcessTable[runningProcess.id - 1], x, waiting);
+              insert_PHPF_priQ(pq, runningProcess);
+            }
+
+            // Get highest priority process
+            runningProcess = extract_highestpri(pq);
+
+            // Update process state to running
+            output(ProcessTable[runningProcess.id - 1], x, running);
+
+            // Start/resume the process
+            kill(runningProcess.pid, SIGCONT);
+          } else {
+            printf("still with the same process!\n");
+            printf("pq Head: %p,\tpid: %d\tpriority: %d\tid: %d\n", pq->head,
+                   runningProcess.pid, runningProcess.priority,
+                   runningProcess.id);
+          }
         }
 
+        // Clean up
+        cleanup_priQ(pq);
+        destroyClk(0);
+        break;
+      }
+#pragma endregion
     }
+  case RR:
+#pragma region "Round Robin"
+
+    while (numberFinishedProcesses < countProcesses) {
+
+#pragma region "Recieving Process Data"
+
+      if(!processWaitingFlag){
+
+      // Check message queue for processes
+      Gen_Sched_RCV_VAL =
+          msgrcv(Gen_Sched_MSGQ, &RecievedProcess,
+                 sizeof(struct processMsgBuff) - sizeof(long), 0, IPC_NOWAIT);
+
+      // If process found, generate process then add it to queue
+      if (Gen_Sched_RCV_VAL != -1 && Gen_Sched_RCV_VAL != 0) {
+          processWaitingFlag = 1;
+          processAllocated = memoryAllocate(
+              RecievedProcess.process.memsize, RecievedProcess.process.id,
+              &allocatedMemoryBlocks, &emptyMemoryBlocks);
+      }
+      }else{
+        if(processAllocated){
+
+
+        int PID = fork();
+        if (PID == 0) {
+          char strrunTime[6];
+          char strid[6];
+          char strarrivalTime[6];
+          sprintf(strrunTime, "%d", RecievedProcess.process.runTime);
+          sprintf(strid, "%d", RecievedProcess.process.id);
+          sprintf(strarrivalTime, "%d", RecievedProcess.process.arrivalTime);
+          char *processargs[] = {"./process.out", strrunTime, strid,
+                                 strarrivalTime, NULL};
+          execv("process.out", processargs);
+        }
+        kill(PID, SIGSTOP);
+
+            // Finding the allocated memory block
+            struct memBlock *tempMemoryBlock = allocatedMemoryBlocks;
+            while (tempMemoryBlock->PID != RecievedProcess.process.id) {
+              tempMemoryBlock = tempMemoryBlock->next;
+            }
+
+        // Initializing some variables for process in the process table
+        ProcessTable[RecievedProcess.process.id - 1].arrivalTime =
+            RecievedProcess.process.arrivalTime;
+        ProcessTable[RecievedProcess.process.id - 1].runTime =
+            RecievedProcess.process.runTime;
+        ProcessTable[RecievedProcess.process.id - 1].remainingTime =
+            RecievedProcess.process.runTime;
+        ProcessTable[RecievedProcess.process.id - 1].id =
+            RecievedProcess.process.id;
+
+        ProcessTable[RecievedProcess.process.id - 1].memSize =
+            RecievedProcess.process.memsize;
+        ProcessTable[RecievedProcess.process.id - 1].offset =
+            tempMemoryBlock->starts;
+
+        // Adding process to queue
+        RecievedProcess.process.pid = PID;
+        insert_RR_priQ(pq, RecievedProcess.process);
+
+
+
+            outputMEM(ProcessTable[RecievedProcess.process.id - 1], x,
+                      ALLOCATE);
+
+            processWaitingFlag = 0;
+            processAllocated = 0;
+      }else{
+            processAllocated = memoryAllocate(
+                RecievedProcess.process.memsize, RecievedProcess.process.id,
+                &allocatedMemoryBlocks, &emptyMemoryBlocks);
+      }
+      }
+#pragma endregion
+
+#pragma region "Round Robin Implementation"
+      // This variable is a place hold for the remaining time parameter that
+      // will be recived form process
+      x = getClk();
+
+      // If current process is terminating, remove the current process and
+      // switch state
+      if (processTerminate == 1 && terminatedProcessId == runningProcess.id) {
+        /*ProcessTable[current_process_info.id - 1] = current_process_info;*/
+        // If there's something in queue, then set running process to the
+        // extracted process from the queue
+        if (pq->head != NULL) {
+          runningProcess = extract_highestpri(pq);
+
+          // NOT SURE WHAT ROUNDROBIN IS DOING HERE BUT CHANGE OF STATE OCCURS
+          // SHOULD BE OUTPUTED
+          current_process_info = ProcessTable[runningProcess.id - 1];
+          output(current_process_info, x, running);
+
+          kill(runningProcess.pid, SIGCONT);
+        }
+
+        // If there's nothing in queue, then set running pid to -1 so the
+        // scheduler knows there is no current running process
+        else {
+          runningProcess.pid = -1;
+        }
+
+        // set flag back to 0
+        processTerminate = 0;
+      }
+
+      // Instead, if time passed is the quantum, or if time is less than
+      // quantum, or if there is no current running process then continue/start
+      // the new process if there is a waiting process in the queue
+      else if (pq->head != NULL &&
+               (x >= (origin + quantum) || runningProcess.pid == -1)) {
+        origin = x;
+        // If runningProcess pid is not -1, that means there is a current
+        // running process, so terminate current running process and put back
+        // into queue
+        if (runningProcess.pid != -1) {
+          // stop current process
+          kill(runningProcess.pid, SIGUSR1);
+          // recieve process info
+          Terminating_Process_RCV_VAL =
+              msgrcv(Terminating_Process_MSGQ, &current_process_msg,
+                     sizeof(struct processStateInfoMsgBuff) - sizeof(long), 0,
+                     !IPC_NOWAIT);
+          // store process info in process table
+          printf("about to take info\n");
+
+          int memsize=ProcessTable[runningProcess.id - 1].memSize;
+          int offset=ProcessTable[runningProcess.id - 1].offset;
+          printf("memsize here is %d\n",memsize);
+          ProcessTable[runningProcess.id - 1] =
+              current_process_msg.processState;
+          ProcessTable[runningProcess.id - 1].memSize=memsize;
+          ProcessTable[runningProcess.id - 1].offset=offset;
+
+          // NOT SURE WHAT ROUNDROBIN IS DOING HERE BUT CHANGE OF STATE OCCURS
+          // SHOULD BE OUTPUTED
+          printf("about to output\n");
+          output(current_process_msg.processState, x, waiting);
+
+          // put process back into queue
+          insert_RR_priQ(pq, runningProcess);
+          // output the state of current running process
+          //
+        }
+        runningProcess = extract_highestpri(pq);
+
+        kill(runningProcess.pid, SIGCONT);
+        current_process_info = ProcessTable[runningProcess.id - 1];
+
+        // Outputs the data when process continues or starts
+        output(current_process_info, x, running);
+      }
+    }
+#pragma endregion
+#pragma endregion
+    break;
+  }
+
+  outputStats(ProcessTable, countProcesses, x);
+
+  // upon termination release the clock resources
+
+  destroyClk(0);
+
+  raise(SIGINT);
 }
+
+#pragma region "Signal Handler Definitions"
+
+void clearResources(int signum) {
+  // TODO Clears all resources in case of interruption
+  printf("Clearing scheduler resources...\n");
+  msgctl(Terminating_Process_MSGQ, IPC_RMID, NULL);
+  /*kill(SchedulerPID, SIGINT);*/
+  // Incomplete
+  struct memBlock *temp=emptyMemoryBlocks;
+  while(temp!=NULL){
+    emptyMemoryBlocks=temp;
+    temp=emptyMemoryBlocks->next;
+    free(emptyMemoryBlocks);
+  }
+  temp=allocatedMemoryBlocks;
+  while(temp!=NULL){
+    allocatedMemoryBlocks=temp;
+    temp=allocatedMemoryBlocks->next;
+    free(allocatedMemoryBlocks);
+  }
+  while (runningProcess.pid != -1) {
+    runningProcess = extract_highestpri(pq);
+    kill(runningProcess.pid, SIGINT);
+  }
+
+  exit(0);
+}
+
+void handler_SIGCHILD(int signal) {
+  processTerminate = 1;
+  proccessRunningSJF = 0;
+  /*numberChildren -= 1;*/
+  numberFinishedProcesses++;
+  origin = x;
+
+  printf("process terminating...\n");
+
+  struct processStateInfoMsgBuff finishedProcessState;
+
+  Terminating_Process_RCV_VAL = msgrcv(
+      Terminating_Process_MSGQ, &finishedProcessState,
+      sizeof(struct processStateInfoMsgBuff) - sizeof(long), 0, !IPC_NOWAIT);
+  if (Terminating_Process_RCV_VAL == -1) {
+    perror("Couldn't recieve final process state. ");
+  };
+  terminatedProcessId = finishedProcessState.processState.id;
+
+      printf("about to deallocate\n");
+  memoryDeallocate(ProcessTable[finishedProcessState.processState.id - 1].id,
+                   &allocatedMemoryBlocks, &emptyMemoryBlocks);
+      printf("deallocated\n");
+
+  outputMEM(ProcessTable[finishedProcessState.processState.id - 1], x, FREE);
+      printf("printed\n");
+
+  struct memBlock* temp=allocatedMemoryBlocks;
+  int number=1;
+  while(temp!=NULL){
+    number++;
+    temp=temp->next;
+  };
+
+  printf("There is %d\n\n",number);
+
+  output(finishedProcessState.processState, x, waiting);
+
+  ProcessTable[finishedProcessState.processState.id - 1] =
+      finishedProcessState.processState;
+  return;
+}
+#pragma endregion
