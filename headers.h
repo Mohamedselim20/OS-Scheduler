@@ -84,6 +84,8 @@ struct PCB
     int priority;
     int start;
     int wait;
+    int size;
+    int startAddress;
 };
 void setPCB(struct PCB* wantedone, int val1, int val2, int val3, int val4, int val5, int val6, int val7, int val8, int val9, int val10)
 {
@@ -301,4 +303,5 @@ struct PCB* rear(struct Queue* queue)
     if (isEmptyQ(queue))
         return NULL;
     return queue->array[queue->rear];
+
 }
