@@ -1,4 +1,3 @@
-
 #include "headers.h"
 void handl(int signum)
 {
@@ -9,8 +8,6 @@ void handl(int signum)
 int main(int agrc, char * argv[])
 {
     initClk();
-    //TODO it needs to get the remaining time from somewhere
-    //remainingtime = ??;
     signal(SIGCHLD,handl);
     key_t shmKey1,prevClkKey;
     shmKey1=ftok("keyfile",65);
@@ -21,6 +18,7 @@ int main(int agrc, char * argv[])
         perror("Error in getting the shared memory");
         exit(-1);
     }
+    //remaining time shared memory
     int shmid1=shmget(shmKey1,sizeof(int),0666);
     if (shmid1 == -1)
     {
@@ -30,21 +28,22 @@ int main(int agrc, char * argv[])
     int *shmaddr =(int *) shmat(shmid1, (void *)0, 0);
     int *prev=(int *) shmat(prevClkID, (void *)0, 0);
     *prev=getClk();
+
     while ((*shmaddr) > 0)
     {
        fflush(stdout);
        while(*prev==getClk())
        {
-           // Loop until prev == getClk()
+           //to wait one clock cycle
        }
        while(*prev==getClk())
        {
-           // Ensure that the condition is true
+           //to wait one cycle after continue running
        }
        *prev=getClk();
        (*shmaddr)--;
-       // printf("remaining time is : %d, pid: %d \n",*shmaddr,getpid());
-       fflush(stdout);
+       kill(SIGUSR1, getppid());
+       printf("Remaining time: %d pid: %d\n", *shmaddr, getpid());
      
     }
     shmdt(shmaddr);
