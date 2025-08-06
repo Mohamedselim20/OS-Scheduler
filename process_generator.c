@@ -1,4 +1,3 @@
-
 #include "headers.h"
 
 void clearResources(int);
@@ -21,12 +20,12 @@ int main(int argc, char * argv[])
 {
     signal(SIGINT, clearResources);
 
-    // TODO Initialization
+    // Initialization
 
     arrivalsSharedMemory();
     int *arrivals;
     arrivals = (int*) shmat(shmid, 0, 0);
-    for(int i = 0; i < 1000; i++)
+    for(int i = 0;i < 1000; i++)
         arrivals[i] = 0;
 
     key_t key_id;
@@ -52,8 +51,8 @@ int main(int argc, char * argv[])
     int numberOfProcesses = 0;
     fscanf(file, "%*[^\n]");
     while (!feof(file)) {
-        int i, a, r, p, m;
-        fscanf(file, "%d\t%d\t%d\t%d\t%d", &i, &a, &r, &p, &m);
+        int i, a, r, p;
+        fscanf(file, "%d\t%d\t%d\t%d", &i, &a, &r, &p);
         numberOfProcesses = i;
     }
     printf("Number of Processes: %d\n", numberOfProcesses);
@@ -69,17 +68,16 @@ int main(int argc, char * argv[])
     fscanf(file, "%*[^\n]");
     int index = 0;
     printf("***Input***\n");
-    printf("id   arrival   runtime   priority   memsize\n");
+    printf("id   arrival   runtime   priority\n");
     while (index < numberOfProcesses) {
-        int i, a, r, p, m;
-        fscanf(file, "%d\t%d\t%d\t%d\t%d", &i, &a, &r, &p, &m);
+        int i, a, r, p;
+        fscanf(file, "%d\t%d\t%d\t%d", &i, &a, &r, &p);
         processes[index].id = i;
         processes[index].arrivaltime = a;
         processes[index].runningtime = r;
         processes[index].priority = p;
-        processes[index].memsize = m;
         arrivals[a]++;
-        printf("%d\t%d\t%d\t%d\t%d \n", i, a, r, p, m);
+        printf("%d\t%d\t%d\t%d\n", i, a, r, p);
         index++;
     }
     fclose(file); // CLose File
