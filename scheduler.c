@@ -58,9 +58,9 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    int num_processes = atoi(argv[0]);
-    int algorithm = atoi(argv[1]);
-    int time_slice = (argc == 3) ? atoi(argv[2]) : 0;
+    int num_processes = atoi(argv[1]);
+    int algorithm = atoi(argv[2]);
+    int time_slice = (argc == 4) ? atoi(argv[3]) : 0;
 
     signal(SIGUSR1, handler);
 
