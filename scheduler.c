@@ -1,103 +1,141 @@
 #include "headers.h"
-#include <math.h>
-#include <signal.h>
-#include <sys/msg.h>
-#include <sys/shm.h>
-#include <sys/ipc.h>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <string.h>
-#include <stdlib.h>
+#include <signal.h>
+#include <limits.h>
 
 int msgq_id;
+int algorithm, time_slice, num_processes;
+int clk;
 
-// Message struct
-struct msgbuff {
-    long mtype;
-    struct processData data;
+struct RunningProcess {
+    struct PCB pcb;
+    int shmid;
+    int pid;
 };
 
-// Signal handler
-void handler(int signum) {
-    // Just notify that a child has decreased its remaining time
+void cleanup(int signum) {
+    msgctl(msgq_id, IPC_RMID, NULL);
+    destroyClk(true);
+    exit(0);
 }
 
-void createProcess(struct processData p) {
-    // 1. Allocate shared memory for remaining time
-    int shmid = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0666);
-    if (shmid == -1) {
-        perror("Failed to create shared memory");
-        exit(EXIT_FAILURE);
+void wait_for_clk_tick(int *last_clk) {
+    while (getClk() == *last_clk) {
+        // busy wait
     }
-
-    int *remainingTime = (int *)shmat(shmid, NULL, 0);
-    *remainingTime = p.runningtime;
-    shmdt(remainingTime);
-
-    // 2. Fork and exec
-    pid_t pid = fork();
-    if (pid == -1) {
-        perror("Fork failed");
-        exit(EXIT_FAILURE);
-    }
-
-    if (pid == 0) {
-        char id_str[10];
-        sprintf(id_str, "%d", shmid);
-        execl("./process.out", "process.out", id_str, NULL);
-        perror("Exec failed");
-        exit(EXIT_FAILURE);
-    } else {
-        printf("Created process PID: %d for process ID: %d\n", pid, p.id);
-    }
+    *last_clk = getClk();
 }
 
 int main(int argc, char *argv[]) {
+    signal(SIGINT, cleanup);
+    initClk();
+
     if (argc < 3) {
-        printf("Usage: ./scheduler.out <num_processes> <algorithm> [timeslice]\n");
+        printf("Usage: %s <num_processes> <algorithm> [time_slice]\n", argv[0]);
         return -1;
     }
 
-    int num_processes = atoi(argv[1]);
-    int algorithm = atoi(argv[2]);
-    int time_slice = (argc == 4) ? atoi(argv[3]) : 0;
+    num_processes = atoi(argv[1]);
+    algorithm = atoi(argv[2]);
+    time_slice = (argc == 4) ? atoi(argv[3]) : 0;
 
-    signal(SIGUSR1, handler);
-
-    initClk();
-
-    // Setup message queue
     key_t key_id = ftok("keyfile", 65);
     msgq_id = msgget(key_id, 0666 | IPC_CREAT);
     if (msgq_id == -1) {
-        perror("Error in msgget");
+        perror("Error creating message queue");
         exit(-1);
     }
 
-    printf("Scheduler started. Waiting for processes...\n");
+    clk = getClk();
+    Node *pq = NULL;
+    struct Queue *rrQueue = createQueue(100);
 
-    int remaining = num_processes;
-    while (remaining > 0) {
-        struct msgbuff msg;
-        int rec_val = msgrcv(msgq_id, &msg, sizeof(msg.data), 0, !IPC_NOWAIT);
+    int finished = 0;
+    struct processData proc;
+    struct RunningProcess *running = NULL;
+    int last_clk = clk;
+    int rr_counter = 0;
 
-        if (rec_val == -1) {
-            perror("Error in receiving message");
-            continue;
+    while (finished < num_processes) {
+        while (msgrcv(msgq_id, &proc, sizeof(proc), 0, IPC_NOWAIT) != -1) {
+            struct PCB *pcb = malloc(sizeof(struct PCB));
+            setPCB(pcb, proc.arrivaltime, proc.runningtime, 0, proc.id, 0, 0, -1, 0, 0);
+
+            if (algorithm == 1) {
+                push(&pq, pcb, proc.priority);
+            } else if (algorithm == 2) {
+                push(&pq, pcb, proc.runningtime);
+            } else if (algorithm == 3) {
+                enqueue(rrQueue, pcb);
+            }
         }
 
-        printf("Received process ID: %d, Arrival: %d, Runtime: %d, Priority: %d\n",
-               msg.data.id, msg.data.arrivaltime, msg.data.runningtime, msg.data.priority);
+        wait_for_clk_tick(&last_clk);
 
-        createProcess(msg.data);
-        remaining--;
+        if (!running) {
+            struct PCB *next = NULL;
+            if (algorithm == 1 || algorithm == 2) {
+                if (!isEmpty(&pq)) {
+                    next = peek(&pq);
+                    pop(&pq);
+                }
+            } else if (algorithm == 3) {
+                if (!isEmptyQ(rrQueue)) {
+                    next = dequeue(rrQueue);
+                }
+            }
+
+            if (next) {
+                key_t shmkey = ftok("keyfile", 100 + next->id);
+                int shmid = shmget(shmkey, sizeof(int), IPC_CREAT | 0666);
+                int *shmaddr = (int *)shmat(shmid, NULL, 0);
+                *shmaddr = next->brust;
+
+                pid_t pid = fork();
+                if (pid == 0) {
+                    char shm_id_str[20];
+                    sprintf(shm_id_str, "%d", shmkey);
+                    execl("./process.out", "process.out", shm_id_str, NULL);
+                    exit(1);
+                }
+
+                struct RunningProcess *rp = malloc(sizeof(struct RunningProcess));
+                rp->pcb = *next;
+                rp->shmid = shmid;
+                rp->pid = pid;
+                rp->pcb.start = getClk();
+
+                running = rp;
+            }
+        } else {
+            int *shmaddr = (int *)shmat(running->shmid, NULL, 0);
+            if (*shmaddr <= 0) {
+                waitpid(running->pid, NULL, 0);
+                finished++;
+                shmdt(shmaddr);
+                shmctl(running->shmid, IPC_RMID, NULL);
+                free(running);
+                running = NULL;
+                rr_counter = 0;
+            } else if (algorithm == 3) {
+                rr_counter++;
+                if (rr_counter >= time_slice) {
+                    kill(running->pid, SIGSTOP);
+                    enqueue(rrQueue, &running->pcb);
+                    rr_counter = 0;
+                    running = NULL;
+                }
+            } else if (algorithm == 2) {
+                if (!isEmpty(&pq) && peek(&pq)->brust < *shmaddr) {
+                    kill(running->pid, SIGSTOP);
+                    push(&pq, &running->pcb, *shmaddr);
+                    running = NULL;
+                }
+            }
+        }
     }
-
-    // Wait for all children
-    while (wait(NULL) > 0);
 
     destroyClk(true);
     msgctl(msgq_id, IPC_RMID, NULL);
-
     return 0;
 }
