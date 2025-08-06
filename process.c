@@ -1,49 +1,47 @@
 #include "headers.h"
 
-void handl(int signum)
-{
+void handle_exit(int signum) {
     destroyClk(false);
-    raise(SIGKILL);  // kill self
+    exit(0);
 }
 
-int main(int argc, char * argv[])
-{
-    signal(SIGCHLD, handl);
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <shm_key>\n", argv[0]);
+        exit(1);
+    }
+
+    signal(SIGINT, handle_exit);
+    signal(SIGUSR1, SIG_IGN);
+
     initClk();
 
-    if (argc < 2)
-    {
-        fprintf(stderr, "Error: Missing shared memory ID.\n");
-        exit(EXIT_FAILURE);
+    key_t shmkey = atoi(argv[1]);
+    int shmid = shmget(shmkey, sizeof(int), 0666);
+    if (shmid == -1) {
+        perror("shmget failed in process");
+        exit(-1);
     }
 
-    int shmid = atoi(argv[1]);
-    int *remainingTime = (int *) shmat(shmid, NULL, 0);
-    if (remainingTime == (void *) -1)
-    {
-        perror("Error attaching shared memory");
-        exit(EXIT_FAILURE);
+    int *remaining_time = (int *)shmat(shmid, NULL, 0);
+    if (remaining_time == (void *)-1) {
+        perror("shmat failed in process");
+        exit(-1);
     }
 
-    int prevClk = getClk();
+    int last_clk = getClk();
+    while (*remaining_time > 0) {
+        while (getClk() == last_clk) {
+            // wait
+        }
+        last_clk = getClk();
 
-    while (*remainingTime > 0)
-    {
-        while (prevClk == getClk()); // wait one tick
-        prevClk = getClk();
-
-        (*remainingTime)--;
-
-        kill(getppid(), SIGUSR1);
-
-        printf("Remaining time: %d, PID: %d\n", *remainingTime, getpid());
+        (*remaining_time)--;
+        printf("Remaining time: %d, PID: %d\n", *remaining_time, getpid());
         fflush(stdout);
     }
 
-    // Cleanup
-    shmdt(remainingTime);
-    shmctl(shmid, IPC_RMID, NULL);
+    shmdt(remaining_time);
     destroyClk(false);
-
     return 0;
 }
